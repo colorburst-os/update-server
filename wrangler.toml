@@ -12,3 +12,8 @@ routes = [
 [[r2_buckets]]
 binding = "RELEASES"
 bucket_name = "colorburst-updates"
+
+# Telemetry tier 1: update-check pings, no identifiers.
+[[analytics_engine_datasets]]
+binding = "PING"
+dataset = "colorburst_pings"

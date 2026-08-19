@@ -38,12 +38,30 @@ function parseRequest(xml) {
     const m = app[0].match(new RegExp(`${name}="([^"]*)"`));
     return m ? m[1] : "";
   };
+  // Omaha ping semantics: the CLIENT tracks when it last reported, so
+  // each device sends at most one "active" ping per day. a/r are
+  // days-since-last-report; -1 means first time ever (= new install).
+  const ping = xml.match(/<ping\s[^>]*>|<ping\s*\/>/);
+  const pattr = (name) => {
+    if (!ping) return null;
+    const m = ping[0].match(new RegExp(`${name}="(-?\\d+)"`));
+    return m ? parseInt(m[1], 10) : null;
+  };
   return {
     appid: attr("appid"),
     version: attr("version"),
     track: attr("track") || attr("channel") || "stable",
     board: attr("board"),
+    // hardware_class = crossystem hwid: empty under crosvm/VMs, non-empty
+    // on real hardware. Used to keep test traffic out of the fleet stats.
+    // NOTE: on reven-based hardware this is the literal string "unknown" --
+    // it identifies a firmware-declared model, and our boards declare none.
+    hardwareClass: attr("hardware_class"),
     hasUpdateCheck: /<updatecheck[\s/>]/.test(xml),
+    hasPing: !!ping,
+    pingActive: pattr("active"),
+    pingA: pattr("a"),
+    pingR: pattr("r"),
   };
 }
 
@@ -107,6 +125,25 @@ export default {
     const relFile = await env.RELEASES.get("releases.json");
     const releases = relFile ? JSON.parse(await relFile.text()) : {};
     const rel = releases[req.track] || releases["stable"];
+
+    // Telemetry tier 1: one row per update check -- version distribution
+    // and active-device counts fall out of this. No identifiers stored.
+    // Only real hardware carries a hardware_class; VMs (crosvm test boots)
+    // send it empty. Gating telemetry on it keeps our own update-testing
+    // out of the device counts -- otherwise every fresh-overlay VM boot
+    // looks like a brand-new device sending its first-ever ping.
+    if (env.PING && req.hardwareClass) {
+      // One row per request. Fleet arithmetic (see README):
+      //   daily actives  = rows/day with is_active_ping = 1
+      //   new installs   = rows with is_first_ping = 1
+      const isActivePing = req.pingA !== null && (req.pingA === -1 || req.pingA > 0);
+      const isFirstPing = req.pingR === -1;
+      env.PING.writeDataPoint({
+        blobs: [req.version, req.track, req.board, rel ? rel.target_version : ""],
+        doubles: [req.hasUpdateCheck ? 1 : 0, isActivePing ? 1 : 0, isFirstPing ? 1 : 0],
+        indexes: [req.version],
+      });
+    }
 
     const wantsUpdate = rel && req.hasUpdateCheck &&
         rel.appid === req.appid &&
