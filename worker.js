@@ -57,6 +57,11 @@ function parseRequest(xml) {
     // NOTE: on reven-based hardware this is the literal string "unknown" --
     // it identifies a firmware-declared model, and our boards declare none.
     hardwareClass: attr("hardware_class"),
+    // Opaque per-installation id minted by the colorburst-device-id upstart
+    // job. Absent on USB/live and recovery boots, which are deliberately not
+    // counted as devices; absent on VMs for the same reason. Never derived
+    // from hardware, so it identifies an install, not a machine.
+    deviceId: attr("colorburst_device_id"),
     hasUpdateCheck: /<updatecheck[\s/>]/.test(xml),
     hasPing: !!ping,
     pingActive: pattr("active"),
@@ -110,6 +115,40 @@ function updateResponse(appid, rel) {
 </response>`;
 }
 
+// Stable 0-99 bucket for a device id: the same install always lands in the
+// same bucket for a given release, so a percentage rollout is a growing set,
+// never a per-request coin flip that would offer an update and then withdraw
+// it. FNV-1a over id + target_version.
+function rolloutBucket(deviceId, targetVersion) {
+  let h = 0x811c9dc5;
+  for (const ch of `${deviceId}@${targetVersion}`) {
+    h ^= ch.charCodeAt(0);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h % 100;
+}
+
+// Decide whether this request's device may have `rel` yet. A release entry
+// can carry either or both of:
+//   "devices": ["<id>", ...]   only these installs (canary smoke test)
+//   "rollout_percent": 0-100   this share of installs, stable per install
+// Absent/invalid means "everyone", i.e. the previous behaviour.
+//
+// A device with no id (USB/live boot, VM, or an older build that predates the
+// id) is treated as in-scope for an unrestricted release, but is never part
+// of a targeted or partial one -- there is nothing stable to target it by.
+function releaseAllowed(rel, deviceId) {
+  const list = Array.isArray(rel.devices) ? rel.devices : null;
+  const pct = Number.isFinite(rel.rollout_percent) ? rel.rollout_percent : null;
+  if (!list && pct === null) return true;
+  if (!deviceId) return false;
+  if (list && !list.includes(deviceId)) return false;
+  if (pct !== null && rolloutBucket(deviceId, rel.target_version) >= pct) {
+    return false;
+  }
+  return true;
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -132,14 +171,22 @@ export default {
     // send it empty. Gating telemetry on it keeps our own update-testing
     // out of the device counts -- otherwise every fresh-overlay VM boot
     // looks like a brand-new device sending its first-ever ping.
-    if (env.PING && req.hardwareClass) {
+    // An install that carries a device id is by construction a real installed
+    // device (the job that mints it skips USB/live and recovery boots), so
+    // that is now the primary gate. hardware_class is kept as the fallback
+    // for devices still on releases that predate the id -- but note it is
+    // the literal "unknown" on reven hardware, which is why it could never
+    // be more than a coarse VM filter.
+    if (env.PING && (req.deviceId || req.hardwareClass)) {
       // One row per request. Fleet arithmetic (see README):
       //   daily actives  = rows/day with is_active_ping = 1
       //   new installs   = rows with is_first_ping = 1
+      //   distinct fleet = COUNT(DISTINCT blob5) where blob5 <> ''
       const isActivePing = req.pingA !== null && (req.pingA === -1 || req.pingA > 0);
       const isFirstPing = req.pingR === -1;
       env.PING.writeDataPoint({
-        blobs: [req.version, req.track, req.board, rel ? rel.target_version : ""],
+        blobs: [req.version, req.track, req.board, rel ? rel.target_version : "",
+                req.deviceId || ""],
         doubles: [req.hasUpdateCheck ? 1 : 0, isActivePing ? 1 : 0, isFirstPing ? 1 : 0],
         indexes: [req.version],
       });
@@ -147,7 +194,8 @@ export default {
 
     const wantsUpdate = rel && req.hasUpdateCheck &&
         rel.appid === req.appid &&
-        versionLess(req.version, rel.target_version);
+        versionLess(req.version, rel.target_version) &&
+        releaseAllowed(rel, req.deviceId);
 
     const xml = wantsUpdate ? updateResponse(req.appid, rel)
                             : noUpdateResponse(req.appid);
