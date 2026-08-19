@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<request protocol="3.0" version="ChromeOSUpdateEngine-0.1.0.0" updaterversion="ChromeOSUpdateEngine-0.1.0.0" installsource="scheduler" ismachine="1">
+    <os version="Indy" platform="Chrome OS" sp="16770.0.0_x86_64"></os>
+    <app appid="{3EFFC3C6-5828-4F3A-967D-BAEA412E2DC8}" version="16770.0.0" track="stable" board="colorburst" hardware_class="" delta_okay="true" installdate="5000" lang="vi" fw_version="" ec_version="" >
+        <ping active="1" a="-1" r="-1"></ping>
+        <updatecheck targetversionprefix=""></updatecheck>
+    </app>
+</request>

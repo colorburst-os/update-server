@@ -1,0 +1,14 @@
+name = "colorburst-update-server"
+main = "worker.js"
+compatibility_date = "2026-08-01"
+
+# update.colorburst.net -> this worker (Cloudflare manages DNS + cert)
+routes = [
+  { pattern = "update.colorburst.net", custom_domain = true }
+]
+
+# Release metadata + payloads live in this bucket; payloads are served to
+# devices via the bucket's own custom domain, dl.colorburst.net.
+[[r2_buckets]]
+binding = "RELEASES"
+bucket_name = "colorburst-updates"

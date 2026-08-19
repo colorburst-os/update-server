@@ -1,0 +1,12 @@
+{
+  "stable": {
+    "appid": "{3EFFC3C6-5828-4F3A-967D-BAEA412E2DC8}",
+    "target_version": "16770.0.1",
+    "payload": "colorburst-2026.32.2-full.bin",
+    "size": 676844062,
+    "sha256_hex": "hex sha256 of the payload file",
+    "metadata_size": 58227,
+    "metadata_signature": "base64 metadata signature from the payload .json",
+    "is_delta": false
+  }
+}
