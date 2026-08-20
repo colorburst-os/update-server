@@ -8,5 +8,17 @@
     "metadata_size": 58227,
     "metadata_signature": "base64 metadata signature from the payload .json",
     "is_delta": false
+  },
+  "dlcs": {
+    "termina-dlc": {
+      "appid": "{3EFFC3C6-5828-4F3A-967D-BAEA412E2DC8}_termina-dlc",
+      "version": "152.16765.0.0-r1",
+      "payload": "termina-dlc-152.16765.0.0-r1-full-signed.bin",
+      "size": 120000000,
+      "sha256_hex": "hex sha256 of the DLC payload file",
+      "metadata_size": 12345,
+      "metadata_signature": "base64 metadata signature from the DLC payload .json",
+      "is_delta": false
+    }
   }
 }
