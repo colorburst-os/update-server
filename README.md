@@ -45,30 +45,41 @@ npx wrangler r2 object put colorburst-updates/releases.json --file releases.json
 
 ## Fleet numbers
 
-Each datapoint's doubles are [has_updatecheck, is_active_ping,
-is_first_ping]. Because the Omaha client itself sends at most one
-active ping per day and marks its first-ever ping with r=-1, fleet
-arithmetic is identifier-free. Query via the Analytics Engine SQL API
-(https://api.cloudflare.com/client/v4/accounts/<acct>/analytics_engine/sql):
+One datapoint per update-server request from real hardware:
+blobs = [version, track, board, offered_version, device_id, hardware_class],
+doubles = [has_updatecheck, is_active_ping, is_first_ping].
+
+**Primary metric — devices seen**: `COUNT(DISTINCT blob5) WHERE blob5 <> ''`
+per day. The device id exists precisely for this: every install that talked
+to the server counts, whether or not Omaha ping bookkeeping cooperated.
+
+**Secondary — Omaha actives**: `SUM(double2)`. The client sends at most one
+`<ping active>` per day, so this is the identifier-free active count — but it
+only works because the worker returns a REAL `<daystart elapsed_seconds>`
+(seconds since UTC midnight). The worker used to return the literal `0`,
+which re-anchored every client's "last ping day" to the moment of each check;
+any device checking more than once a day then never pinged again, and this
+metric read zero for real, healthy hardware (found 2026-08-20 when the first
+real device was invisible in stats). Meaningful from 2026-08-21 on.
 
 ```sql
--- daily active devices, by day
+-- devices seen, by day (primary)
+SELECT toDate(timestamp) AS day, COUNT(DISTINCT blob5) AS devices
+FROM colorburst_pings WHERE blob5 <> '' GROUP BY day ORDER BY day;
+
+-- Omaha actives, by day
 SELECT toDate(timestamp) AS day, SUM(double2) AS active_devices
 FROM colorburst_pings GROUP BY day ORDER BY day;
 
 -- new installs, by day
 SELECT toDate(timestamp) AS day, SUM(double3) AS new_installs
 FROM colorburst_pings GROUP BY day ORDER BY day;
-
--- version distribution among today's actives
-SELECT blob1 AS version, SUM(double2) AS devices
-FROM colorburst_pings WHERE timestamp > NOW() - INTERVAL '1' DAY
-GROUP BY version;
 ```
 
-Installed base = actives over a 7- or 28-day window (ages out retired
-machines, unlike cumulative installs). Caveat: unofficial (dev) builds
-never ping — the numbers begin with the first official release.
+Installed base = devices seen over a 7- or 28-day window (ages out retired
+machines, unlike cumulative installs). Caveats: unofficial (dev) builds never
+check in, and builds older than the device-id patch (pre-2026.32.7) have
+`blob5 = ''` and are visible only in raw row counts.
 
 Publishing a release = upload the payload to
 `payloads/<target_version>/<name>.bin` in the bucket, then upload the
@@ -76,21 +87,25 @@ updated `releases.json`. Telemetry tier 1 (version distribution, active
 devices) accumulates in the `colorburst_pings` Analytics Engine dataset
 with no device identifiers.
 
-## Checking the numbers: stats.sh
+## Checking the numbers: stats.py
 
-`./stats.sh` queries the Analytics Engine dataset and graphs it in the
-terminal (reads the token from `~/.cloudflare/token`):
+`./stats.py` (Python 3, stdlib only; replaces the old stats.sh) queries the
+Analytics Engine dataset and graphs it in the terminal (reads the token from
+`~/.cloudflare/token`):
 
 ```
-./stats.sh              # active devices/day, last 30 days (ASCII bar graph)
-./stats.sh active 90    # explicit window
-./stats.sh installs     # new installs/day
-./stats.sh versions     # active devices by version, today
-./stats.sh boards       # active devices by board, today
-./stats.sh sql "SELECT ..."   # raw query, pretty-printed JSON
-./stats.sh html 30      # write stats.html — self-contained SVG charts,
+./stats.py              # devices seen/day, last 30 days (ASCII bar graph)
+./stats.py devices 90   # explicit window
+./stats.py active       # Omaha active pings/day (meaningful from 2026-08-21)
+./stats.py installs     # new installs/day
+./stats.py versions 7   # devices by client version, last 7 days
+./stats.py boards       # devices by board
+./stats.py hardware     # raw rows by hardware_class (telemetry-gate diagnosis)
+./stats.py sql "SELECT ..."   # raw query, pretty-printed JSON
+./stats.py html 30      # write stats.html — self-contained SVG charts,
                         #   dark-mode aware, open in a browser
 ```
 
-Only real hardware is counted (the worker gates telemetry on a non-empty
-`hardware_class`, which is empty under crosvm), so test VMs never appear.
+Only real installs are counted (the worker gates telemetry on the device id,
+falling back to a non-empty `hardware_class` for pre-device-id builds; both
+are absent under crosvm), so test VMs never appear.

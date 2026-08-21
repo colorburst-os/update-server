@@ -95,10 +95,28 @@ function parseRequest(xml) {
 // One <response> wrapping one <app> per requested app. Splitting the document
 // into per-app fragments is what lets a DLC-install request (platform app +
 // several DLC apps) get an individually-correct answer for each app.
+//
+// daystart is LOAD-BEARING for the ping metrics: update_engine anchors its
+// "last ping day" prefs to (now - elapsed_seconds) after EVERY successful
+// response (omaha_request_action.cc UpdateLastPingDays), and only sends
+// <ping a=/r=> when a full day has passed since that anchor. The literal
+// "0" this used to return anchored to the moment of each check, so any
+// device checking more often than daily NEVER pinged again -- a sliding
+// window that reset on contact, which is why the fleet stats missed real
+// hardware. Real Omaha returns seconds since the server's midnight; doing
+// the same (UTC) pins the anchor to the calendar day and pings fire once
+// per UTC day no matter how often the client checks.
+function daystartElapsedSeconds() {
+  const now = new Date();
+  const midnightUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(),
+                               now.getUTCDate());
+  return Math.floor((now.getTime() - midnightUtc) / 1000);
+}
+
 function wrapResponse(appFragments) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <response protocol="3.0" server="colorburst">
- <daystart elapsed_seconds="0"/>
+ <daystart elapsed_seconds="${daystartElapsedSeconds()}"/>
 ${appFragments.join("\n")}
 </response>`;
 }
@@ -222,15 +240,20 @@ export default {
     // the literal "unknown" on reven hardware, which is why it could never
     // be more than a coarse VM filter.
     if (env.PING && (req.deviceId || req.hardwareClass)) {
-      // One row per request. Fleet arithmetic (see README):
-      //   daily actives  = rows/day with is_active_ping = 1
+      // One row per request. Fleet arithmetic (see README / stats.py):
+      //   devices seen   = COUNT(DISTINCT blob5) where blob5 <> ''  (primary)
+      //   daily actives  = rows/day with is_active_ping = 1  (Omaha semantics;
+      //                    depends on the daystart fix above to fire at all)
       //   new installs   = rows with is_first_ping = 1
-      //   distinct fleet = COUNT(DISTINCT blob5) where blob5 <> ''
+      // blob6 = the raw hardware_class attribute, stored for diagnosis: it is
+      // the telemetry gate's fallback for pre-device-id builds, and whether
+      // real reven hardware sends "unknown" or "" decides if that fallback
+      // ever fires (the 08-18..08-20 dataset gap says probably never).
       const isActivePing = req.pingA !== null && (req.pingA === -1 || req.pingA > 0);
       const isFirstPing = req.pingR === -1;
       env.PING.writeDataPoint({
         blobs: [req.version, req.track, req.board, rel ? rel.target_version : "",
-                req.deviceId || ""],
+                req.deviceId || "", req.hardwareClass || ""],
         doubles: [req.hasUpdateCheck ? 1 : 0, isActivePing ? 1 : 0, isFirstPing ? 1 : 0],
         indexes: [req.version],
       });
