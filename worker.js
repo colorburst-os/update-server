@@ -14,27 +14,13 @@
 const OS_APPID = "{3EFFC3C6-5828-4F3A-967D-BAEA412E2DC8}";
 const PAYLOAD_BASE = "https://dl.colorburst.net/payloads/";
 
-// DLC-over-Omaha. Crostini's dlcservice asks update_engine to install these
-// on demand; update_engine forms a composite appid GetAppId() + "_" + dlc_id
-// (platform2/update_engine/cros/omaha_request_params.cc:350-353) and sends one
-// <app> per DLC. We answer each with a normal DLC payload manifest served from
-// R2 under dlcs/<dlc_id>/<version>/<name>, verified on-device with the SAME
-// update-payload key as the OS payload (payload_verifier.cc has no DLC path).
-//
-// Only these three are served; anything else gets noupdate (the pre-existing
-// behaviour that shows "update ChromeOS to install Linux" -- harmless, and the
-// correct fallback for a DLC we don't host).
-const DLC_PAYLOAD_BASE = "https://dl.colorburst.net/dlcs/";
-const DLC_IDS = new Set(["termina-dlc", "termina-tools-dlc", "edk2-ovmf-dlc"]);
-
-// Parse "{OS_APPID}_<dlc_id>" -> "<dlc_id>", or null if not one of ours. The
-// separator is a single underscore and the OS appid itself contains none, so a
-// prefix strip is unambiguous.
-function dlcIdForAppid(appid) {
-  if (!appid.startsWith(OS_APPID + "_")) return null;
-  const id = appid.slice(OS_APPID.length + 1);
-  return DLC_IDS.has(id) ? id : null;
-}
+// DLCs are NOT served from here. Crostini's DLCs (termina, termina-tools,
+// edk2-ovmf) are force-ota: update_engine's InstallAction fetches the raw
+// dlc.img straight from dl.colorburst.net/dlc/... and verifies it against the
+// imageloader manifest hash baked into the rootfs -- Omaha is never consulted
+// (see chromium-os release/DLC-RELEASE.md). A DLC-install request still
+// reaches this server carrying one <app> per DLC (composite appid
+// "{OS_APPID}_<dlc_id>"); each simply gets a well-formed noupdate below.
 
 function xmlEscape(s) {
   return String(s).replace(/[<>&"']/g,
@@ -164,53 +150,6 @@ function updateResponse(appid, rel) {
   return wrapResponse([appUpdate(appid, rel)]);
 }
 
-// A DLC update manifest. Structurally identical to the OS one (update_engine
-// parses both through the same SAX handler -- omaha_parser_xml.cc) but served
-// from dlcs/<dlc_id>/<version>/ and carrying the DLC payload's own hashes.
-//
-// The <manifest version> here is cosmetic for the install path: dlcservice
-// installs send version="0.0.0.0" (kNoVersion) for the DLC app
-// (omaha_request_builder_xml.cc:497), and a mismatch against the platform app
-// version is only a LOG(WARNING), never fatal (omaha_request_action.cc:655).
-// We publish the DLC's imageloader version as `dlc.version` and echo it here;
-// it is NOT version-compared (see the fetch handler for why).
-//
-// Fields update_engine actually reads (verified against omaha_parser_xml.cc /
-// omaha_request_action.cc ParsePackage):
-//   <url codebase>                          non-empty, required
-//   <package name= size= hash_sha256=>      name non-empty, size>0, hash non-empty
-//   <package fp=>                            optional (kRepeatedFpFromOmaha guard)
-//   <action event="postinstall" MetadataSize= MetadataSignatureRsa= IsDeltaPayload=>
-//                                            postinstall action required
-// `required=` on <package> is NOT parsed by update_engine (no kAttrRequired);
-// kept only for parity with the OS manifest.
-function appDlcUpdate(appid, dlcId, dlc) {
-  const version = dlc.version || "0.0.0.0";
-  const codebase = DLC_PAYLOAD_BASE + encodeURIComponent(dlcId) + "/" +
-                   encodeURIComponent(version) + "/";
-  return ` <app appid="${xmlEscape(appid)}" status="ok">
-  <ping status="ok"/>
-  <updatecheck status="ok">
-   <urls><url codebase="${xmlEscape(codebase)}"/></urls>
-   <manifest version="${xmlEscape(version)}">
-    <actions>
-     <action event="update" run="${xmlEscape(dlc.payload)}"/>
-     <action event="postinstall" ChromeOSVersion="${xmlEscape(version)}"
-             ChromeVersion="1.0.0.0" IsDeltaPayload="${dlc.is_delta ? "true" : "false"}"
-             MetadataSize="${xmlEscape(dlc.metadata_size)}"
-             MetadataSignatureRsa="${xmlEscape(dlc.metadata_signature)}"
-             MaxDaysToScatter="0" DisablePayloadBackoff="false"/>
-    </actions>
-    <packages>
-     <package name="${xmlEscape(dlc.payload)}" size="${xmlEscape(dlc.size)}"
-              hash_sha256="${xmlEscape(dlc.sha256_hex)}"
-              fp="${xmlEscape("1." + dlc.sha256_hex)}" required="true"/>
-    </packages>
-   </manifest>
-  </updatecheck>
- </app>`;
-}
-
 // Stable 0-99 bucket for a device id: the same install always lands in the
 // same bucket for a given release, so a percentage rollout is a growing set,
 // never a per-request coin flip that would offer an update and then withdraw
@@ -269,10 +208,6 @@ export default {
     const relFile = await env.RELEASES.get("releases.json");
     const releases = relFile ? JSON.parse(await relFile.text()) : {};
     const rel = releases[req.track] || releases["stable"];
-    // DLC metadata lives in a sibling `dlcs` key of the same releases.json (one
-    // R2 read, channel-agnostic -- see README). Absent on old buckets -> {}.
-    const dlcs = (releases.dlcs && typeof releases.dlcs === "object")
-        ? releases.dlcs : {};
 
     // Telemetry tier 1: one row per update check -- version distribution
     // and active-device counts fall out of this. No identifiers stored.
@@ -305,30 +240,11 @@ export default {
     // request (update_engine matches by appid, not position, but this keeps it
     // readable and identical to the old single-app output).
     const fragments = apps.map((a) => {
-      const dlcId = dlcIdForAppid(a.appid);
-      if (dlcId) {
-        // DLC install/update. We do NOT version-compare DLCs:
-        //  * an install sends version="0.0.0.0" (omaha_request_builder_xml.cc
-        //    :497), so any comparison trivially passes anyway;
-        //  * a background DLC update sends the OS platform version, which is
-        //    NOT comparable to the DLC's imageloader version (different
-        //    numbering, e.g. 16770.0.1 vs 152.16765.0.0-r1) -- comparing them
-        //    would wrongly yield noupdate.
-        // dlcservice's own installed-state tracking (and update_engine's
-        // last_fp de-dup) prevent reinstall loops, so serving whenever the DLC
-        // app carries an <updatecheck> is correct and matches nebraska. An
-        // unknown/absent DLC falls through to noupdate.
-        const dlc = dlcs[dlcId];
-        if (a.hasUpdateCheck && dlc && dlc.payload && dlc.sha256_hex &&
-            dlc.metadata_signature) {
-          return appDlcUpdate(a.appid, dlcId, dlc);
-        }
-        return appNoUpdate(a.appid);
-      }
-      // Platform app: unchanged OS logic. Version-compared, track-selected,
-      // rollout-gated. Only the app whose appid matches the release is offered
-      // an update; a skip_update platform app (DLC install) has no
-      // <updatecheck> and so gets noupdate.
+      // Platform app: version-compared, track-selected, rollout-gated. Only
+      // the app whose appid matches the release is offered an update. Every
+      // other app -- a skip_update platform app, or the per-DLC apps of a DLC
+      // install (served from the CDN, not from here; see the header) -- gets
+      // a well-formed noupdate.
       const wantsUpdate = rel && a.hasUpdateCheck &&
           rel.appid === a.appid &&
           versionLess(a.version, rel.target_version) &&

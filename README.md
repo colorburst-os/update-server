@@ -7,48 +7,25 @@ the `colorburst-updates` R2 bucket via https://dl.colorburst.net.
 - `worker.js` — the responder (version-compared, unlike nebraska)
 - `wrangler.toml` — routes, R2 binding, Analytics Engine dataset
 - `releases.example.json` — goes into the bucket as `releases.json`;
-  the OS-track fields are exactly what `cros_generate_update_payload` emits,
-  plus a `dlcs` section (see below)
+  the per-track fields are exactly what `cros_generate_update_payload` emits
 - `test-request.xml` — a realistic update_engine request for local tests
 
-## DLC delivery (Crostini termina / termina-tools / edk2-ovmf)
+## DLCs are not served from here
 
-Crostini's DLCs are served over the same Omaha endpoint. When dlcservice asks
-update_engine to install a DLC, update_engine sends an `<app>` whose appid is
-the composite `{OS_APPID}_<dlc_id>` (update_engine
-`omaha_request_params.cc:350-353`, `GetAppId() + "_" + dlc_id`). An install
-request carries the platform app (with `skip_update`, so no `<updatecheck>`)
-followed by one `<app>` per DLC, each with its own `<updatecheck>`.
+Crostini's DLCs (`termina-dlc`, `termina-tools-dlc`, `edk2-ovmf-dlc`) are
+force-ota DLCs: update_engine's `InstallAction` downloads the raw `dlc.img`
+directly from `https://dl.colorburst.net/dlc/dlc/<id>/package/dlc.img` (the
+same R2 bucket, `dlc/` prefix) and verifies it against the imageloader
+manifest hash baked into the signed rootfs. **Omaha is never consulted** for
+these installs, so this worker plays no part in them. A DLC-install request
+still reaches the endpoint carrying one `<app>` per DLC (composite appid
+`{OS_APPID}_<dlc_id>`); each gets a well-formed `noupdate`.
 
-The worker answers every `<app>`: the platform app keeps the existing
-version-compared OS logic; a DLC app whose id is one of `termina-dlc`,
-`termina-tools-dlc`, `edk2-ovmf-dlc` gets an `ok` manifest pointing at its
-signed payload; anything else gets `noupdate`. DLC payloads verify on-device
-with the SAME update-payload key as the OS payload.
-
-DLCs are NOT version-compared: an install sends `version="0.0.0.0"`
-(`omaha_request_builder_xml.cc:497`) and a background update sends the OS
-platform version, which isn't comparable to a DLC's imageloader version.
-dlcservice's own installed-state tracking prevents reinstall loops, so the
-worker serves whenever the DLC app carries an `<updatecheck>` (matching
-nebraska).
-
-**Metadata schema** — a top-level `dlcs` key in the same `releases.json` (one
-R2 read, and DLCs are channel-agnostic so they don't belong under a track).
-Each `dlcs.<dlc_id>` mirrors an OS-track entry: `version` (the DLC's
-imageloader version, used for the R2 path and echoed as `<manifest version>`),
-`payload`, `size`, `sha256_hex` (hex), `metadata_size`, `metadata_signature`
-(base64), `is_delta`. See `releases.example.json`.
-
-**R2 layout** — signed DLC payloads live at
-`dlcs/<dlc_id>/<version>/<payload>-signed.bin`, served to devices via
-`https://dl.colorburst.net/dlcs/`. OS payloads keep their `payloads/<version>/`
-layout, untouched.
-
-Build/sign/publish the DLC payloads with `release/gen-dlc-payloads.sh`,
-`release/sign-dlc-on-yubikey.sh`, `release/publish-dlcs.sh` — full runbook in
-`release/DLC-RELEASE.md`. `publish-dlcs.sh` MERGES the `dlcs` key into the live
-`releases.json` and leaves the OS tracks alone.
+Publish the DLC images with `release/publish-dlc-images.sh` in the chromium-os
+repo — full explanation in its `release/DLC-RELEASE.md`. (An earlier
+DLC-over-Omaha design shipped here briefly; it was removed once we learned
+force-ota DLCs bypass Omaha, so its `dlcs` metadata key and `dlcs/` R2 payloads
+are gone.)
 
 Local test loop:
 
